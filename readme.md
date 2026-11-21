@@ -358,7 +358,332 @@ SQLite-এর সব DDL operation সবসময় transactional বা সহ�
 **AI file-edit restriction:** AI `Database/` folder-এর source/config/database files edit, replace, rename বা delete করবে না।
 
 **Runtime application permission:** PHP application-কে SQLite database file এবং প্রয়োজনীয় journal/WAL files লেখার permission দিতে হতে পারে। এই permission AI-এর file-edit access নয়। Production-এ OS user, folder permission ও backup policy দিয়ে নিয়ন্ত্রণ করতে হবে।
+6.8 High-Performance Database Engine
 
+পুরো Application-এ SQLite Database-এর জন্য Performance-First Architecture বাধ্যতামূলক।
+
+প্রধান লক্ষ্য:
+
+Fast Read Operations
+
+Fast Write Operations
+
+Optimized Database Indexing
+
+Minimum Database Lock Contention
+
+Concurrent Read/Write Support
+
+Efficient Memory and Cache Usage
+
+Scalable Query Architecture
+
+6.8.1 SQLite WAL Mode (Mandatory)
+
+Database অবশ্যই WAL (Write-Ahead Logging) Mode ব্যবহার করবে।
+
+Database initialization-এর সময়:
+
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA foreign_keys = ON;
+PRAGMA temp_store = MEMORY;
+PRAGMA cache_size = -8000;
+PRAGMA busy_timeout = 5000;
+
+Rules:
+
+WAL Mode একবার Database initialization/migration-এর সময় configure করতে হবে।
+
+প্রতিটি PDO connection-এ প্রয়োজনীয় connection-level PRAGMA configure করতে হবে।
+
+WAL ব্যবহার করে Readers এবং Writer-কে একই সময়ে কাজ করার সুযোগ দিতে হবে।
+
+Long-running read transaction রাখা যাবে না।
+
+Checkpoint management থাকতে হবে।
+
+WAL এবং SHM files কখনো manually delete করা যাবে না।
+
+Database backup অবশ্যই WAL-aware এবং consistent হতে হবে।
+
+Important: SQLite একই সময়ে একাধিক Writer-কে স্বাধীনভাবে লিখতে দেয় না। তাই Write operations দ্রুত, ছোট এবং serialized রাখতে হবে।
+
+6.8.2 Mandatory Database Indexing System
+
+প্রতিটি Table তৈরির সময় Index Planning বাধ্যতামূলক।
+
+প্রতিটি Index-এর জন্য একটি Unique Index ID এবং descriptive name থাকবে।
+
+Naming convention:
+
+IDX_001_emp_status
+IDX_002_emp_created_at
+IDX_003_att_employee_date
+IDX_004_acc_transaction_date
+
+Index Registry:
+
+Documentation/DATABASE_INDEX_REGISTRY.md
+
+প্রতিটি Index-এর তথ্য:
+
+Index ID
+
+Index Name
+
+Module Name
+
+Table Name
+
+Indexed Columns
+
+Index Type
+
+Purpose
+
+Unique / Non-Unique
+
+Created Migration
+
+Status
+
+Rules:
+
+Primary Key অবশ্যই নির্ধারণ করতে হবে।
+
+Foreign Key columns-এ প্রয়োজনীয় Index থাকতে হবে।
+
+Frequently searched columns-এ Index থাকতে হবে।
+
+Frequently filtered columns-এ Index থাকতে হবে।
+
+Date-based reports-এর জন্য উপযুক্ত Index থাকতে হবে।
+
+Frequently combined WHERE conditions-এর জন্য Composite Index ব্যবহার করতে হবে।
+
+ORDER BY ও JOIN query অনুযায়ী Index design করতে হবে।
+
+একই কাজের Duplicate Index তৈরি করা যাবে না।
+
+অপ্রয়োজনীয় Index তৈরি করা যাবে না।
+
+প্রতিটি নতুন Module-এর Migration-এর সঙ্গে Index creation থাকতে হবে।
+
+Example:
+
+CREATE INDEX IF NOT EXISTS IDX_001_emp_status
+ON emp_employees(status);
+
+CREATE INDEX IF NOT EXISTS IDX_002_emp_created_at
+ON emp_employees(created_at);
+
+CREATE INDEX IF NOT EXISTS IDX_003_att_employee_date
+ON att_attendance(employee_id, attendance_date);
+
+6.8.3 Database Read Optimization
+
+Data read করার সময় Performance-First Query Rules অনুসরণ করতে হবে।
+
+Mandatory rules:
+
+SELECT * ব্যবহার করা যাবে না, যদি প্রয়োজনীয় columns নির্দিষ্ট করা সম্ভব হয়।
+
+সব বড় Table-এ Pagination বাধ্যতামূলক।
+
+OFFSET-based pagination-এর পরিবর্তে প্রয়োজন অনুযায়ী Keyset/Cursor Pagination ব্যবহার করতে হবে।
+
+Search query-তে indexed columns অগ্রাধিকার পাবে।
+
+N+1 Query Problem প্রতিরোধ করতে হবে।
+
+একই Data বারবার পড়লে উপযুক্ত application-level cache ব্যবহার করা যাবে।
+
+Report-এর জন্য date range ও filtering ব্যবহার করতে হবে।
+
+অপ্রয়োজনীয় JOIN বন্ধ রাখতে হবে।
+
+Large Dataset একবারে Memory-তে Load করা যাবে না।
+
+Example:
+
+SELECT id, employee_name, status
+FROM emp_employees
+WHERE status = :status
+ORDER BY id DESC
+LIMIT :limit;
+
+Keyset Pagination:
+
+SELECT id, employee_name
+FROM emp_employees
+WHERE id < :last_id
+ORDER BY id DESC
+LIMIT :limit;
+
+6.8.4 Database Write Optimization
+
+Write operations এমনভাবে তৈরি করতে হবে যাতে Database Lock-এর সম্ভাবনা কম থাকে।
+
+Mandatory rules:
+
+Database Transaction যতটা সম্ভব ছোট রাখতে হবে।
+
+Transaction-এর ভিতরে Email, API request, file upload বা external operation করা যাবে না।
+
+একাধিক INSERT-এর ক্ষেত্রে Batch Insert ব্যবহার করতে হবে।
+
+Prepared Statement পুনরায় ব্যবহার করতে হবে।
+
+প্রয়োজন ছাড়া একাধিক UPDATE query চালানো যাবে না।
+
+Bulk Insert/Update-এর জন্য transaction ব্যবহার করতে হবে।
+
+Read-only operation-এর জন্য write transaction শুরু করা যাবে না।
+
+Write conflict হলে controlled retry mechanism থাকতে হবে।
+
+Retry করার আগে bounded delay ও jitter ব্যবহার করতে হবে।
+
+একই transaction অনির্দিষ্টকাল retry করা যাবে না।
+
+Example:
+
+$pdo->beginTransaction();
+
+try {
+    $stmt = $pdo->prepare(
+        "INSERT INTO emp_employees
+        (employee_name, status)
+        VALUES (:name, :status)"
+    );
+
+    $stmt->execute([
+        ':name' => $name,
+        ':status' => $status
+    ]);
+
+    $pdo->commit();
+
+} catch (Throwable $e) {
+
+    if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+    }
+
+    throw $e;
+}
+
+6.8.5 Database Connection Management
+
+Database connection শুধুমাত্র Core Database Manager পরিচালনা করবে।
+
+প্রতিটি PHP request-এ managed PDO connection ব্যবহার করতে হবে।
+
+একই request-এর Module-গুলো shared Database Service ব্যবহার করবে।
+
+প্রতিটি connection-এ busy_timeout এবং প্রয়োজনীয় PRAGMA configure করতে হবে।
+
+Module নিজস্ব unmanaged connection তৈরি করতে পারবে না।
+
+Connection error হলে controlled exception handling থাকতে হবে।
+
+Database connection অপ্রয়োজনে দীর্ঘ সময় খোলা রাখা যাবে না।
+
+6.8.6 Database Lock Prevention
+
+Database Lock Error প্রতিরোধের জন্য:
+
+WAL Mode বাধ্যতামূলক।
+
+Busy Timeout বাধ্যতামূলক।
+
+Short Transaction বাধ্যতামূলক।
+
+Long-running Write Transaction নিষিদ্ধ।
+
+Concurrent Write-এর জন্য Queue বা controlled serialization প্রয়োজন অনুযায়ী ব্যবহার করতে হবে।
+
+Read operation-কে Write operation-এর জন্য অপ্রয়োজনীয়ভাবে আটকে রাখা যাবে না।
+
+SQLITE_BUSY এবং SQLITE_LOCKED আলাদাভাবে handle করতে হবে।
+
+Safe Retry Mechanism থাকতে হবে।
+
+Checkpoint monitoring থাকতে হবে।
+
+Database Lock Error Logger-এ সংরক্ষণ করতে হবে।
+
+কোনো অবস্থাতেই Database Lock Error হলে silently data discard করা যাবে না।
+
+6.8.7 Query Performance Monitoring
+
+প্রতিটি গুরুত্বপূর্ণ Query-এর Performance পরীক্ষা করতে হবে।
+
+SQLite Query Plan:
+
+EXPLAIN QUERY PLAN
+SELECT id, employee_name
+FROM emp_employees
+WHERE status = 'active';
+
+Rules:
+
+অপ্রয়োজনীয় Full Table Scan শনাক্ত করতে হবে।
+
+প্রয়োজনীয় Index ব্যবহার হচ্ছে কি না যাচাই করতে হবে।
+
+Slow Query Log রাখতে হবে।
+
+Index usage ও query performance নিয়মিত পর্যালোচনা করতে হবে।
+
+Index তৈরি করলেই Query দ্রুত হবে এমন ধরে নেওয়া যাবে না; Query Plan পরীক্ষা বাধ্যতামূলক।
+
+প্রয়োজন অনুযায়ী ANALYZE চালাতে হবে।
+
+6.8.8 Database Index Maintenance
+
+Database Schema পরিবর্তনের সময় Index Registry আপডেট করতে হবে।
+
+Migration-এর সঙ্গে Index creation/deletion যুক্ত করতে হবে।
+
+Duplicate Index শনাক্ত করতে হবে।
+
+Unused Index পরীক্ষা করতে হবে।
+
+Destructive Index changes-এর আগে backup নিতে হবে।
+
+Index integrity ও schema consistency যাচাই করতে হবে।
+
+6.8.9 Database Performance Acceptance Criteria
+
+কোনো Module Complete ঘোষণার আগে:
+
+সব গুরুত্বপূর্ণ Query-এর Index Plan পরীক্ষা করা হয়েছে।
+
+প্রয়োজনীয় Index তৈরি হয়েছে।
+
+WAL Mode সক্রিয়।
+
+Concurrent Read Test Pass।
+
+Concurrent Write Test Pass।
+
+Read/Write contention test Pass।
+
+Database Lock Recovery Test Pass।
+
+Pagination Test Pass।
+
+Bulk Insert Test Pass।
+
+No silent data loss।
+
+Query Performance Report তৈরি হয়েছে।
+
+DATABASE_INDEX_REGISTRY.md আপডেট হয়েছে।
+
+Performance test-এ বাস্তবসম্মত data volume ব্যবহার করতে হবে। পরীক্ষার ফল ছাড়া Performance claim করা যাবে না।
 ---
 
 # 7. Module Ownership ও Database Safety
