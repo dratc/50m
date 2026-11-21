@@ -1987,3 +1987,691 @@ PROJECT_STATUS.md ও Module README-এর proposed update দেখাও।
 **Documentation পড়ুন → Module Request দিন → Analysis নিন → Plan অনুমোদন করুন → Implement করুন → Test করুন → Document করুন → Status update করুন।**
 
 এই নিয়ম মেনে চললে ৫০টি Module আলাদা আলাদা তৈরি হলেও পুরো application-এর Architecture, Database, Security এবং Frontend consistency বজায় রাখা অনেক সহজ হবে।
+
+
+# DATABASE ARCHITECTURE V2.0
+## 50-Module Business Management Application
+
+**Status:** Proposed — Red Team Revision  
+**Scope:** Database Only  
+**Architecture:** Modular Monolith  
+**Database:** SQLite  
+**Connection Layer:** PDO  
+**PHP:** 8.3+  
+**Policy:** Preserve Existing Technology Stack
+
+---
+
+# 1. DATABASE ARCHITECTURE PRINCIPLES
+
+The application must use one Central SQLite Database managed by the Core Database Engine.
+
+All 50 Modules must follow the same database standards.
+
+### Mandatory Principles
+
+1. One central database file.
+2. Centralized PDO Connection Manager.
+3. Module-owned database schemas and migrations.
+4. Centralized Migration Runner.
+5. Mandatory query optimization.
+6. Workload-based indexing.
+7. WAL-based concurrency.
+8. Short database transactions.
+9. Safe write conflict handling.
+10. Consistent database backup and recovery.
+11. Database integrity validation.
+12. Query performance monitoring.
+
+No Module may independently initialize or manage an unmanaged database connection.
+
+# 2. CENTRAL DATABASE DIRECTORY
+
+Recommended structure:
+
+```text
+app/
+├── Core/
+│   └── Database/
+│       ├── Connection.php
+│       ├── ConnectionManager.php
+│       ├── TransactionManager.php
+│       ├── MigrationRunner.php
+│       ├── QueryMonitor.php
+│       ├── IndexRegistry.php
+│       ├── DatabaseHealth.php
+│       ├── BackupManager.php
+│       └── LockManager.php
+│
+├── Modules/
+│   ├── Employees/
+│   │   ├── Database/
+│   │   │   ├── Migrations/
+│   │   │   └── Seeds/
+│   │   └── Repositories/
+│   │
+│   ├── Attendance/
+│   │   ├── Database/
+│   │   │   ├── Migrations/
+│   │   │   └── Seeds/
+│   │   └── Repositories/
+│   │
+│   └── Accounts/
+│       ├── Database/
+│       │   ├── Migrations/
+│       │   └── Seeds/
+│       └── Repositories/
+│
+├── storage/
+│   ├── database/
+│   │   └── application.sqlite
+│   │
+│   ├── backups/
+│   ├── logs/
+│   └── cache/
+│
+└── Documentation/
+    ├── DATABASE_INDEX_REGISTRY.md
+    ├── DATABASE_MIGRATION_HISTORY.md
+    └── DATABASE_PERFORMANCE.md
+```
+
+**Security:** `storage/` must remain outside the public web root.
+
+# 3. DATABASE CONNECTION MANAGEMENT
+
+The Core Database Manager owns all database connections.
+
+### Connection Rules
+
+- One managed PDO connection per application request.
+- Modules within the same request reuse the managed connection.
+- Separate PHP-FPM requests use separate PDO connections.
+- Never maintain a global PDO connection shared across independent PHP requests.
+- Configure connection-level PRAGMAs whenever a connection is created.
+- Close unnecessary connections at the end of execution.
+
+### Required PDO Configuration
+
+```php
+$pdo = new PDO(
+    'sqlite:' . DATABASE_PATH,
+    null,
+    null,
+    [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        PDO::ATTR_EMULATE_PREPARES => false,
+    ]
+);
+```
+
+Configure SQLite:
+
+```sql
+PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
+PRAGMA synchronous = FULL;
+PRAGMA temp_store = MEMORY;
+PRAGMA cache_size = -8000;
+```
+
+These values are initial configuration candidates, not universal performance settings.
+
+Memory cache must be evaluated against PHP-FPM worker count and available RAM.
+
+WAL mode must be enabled and verified during database initialization:
+
+```sql
+PRAGMA journal_mode = WAL;
+```
+
+Do not execute journal-mode changes on every request.
+
+### Durability Policy
+
+Use `synchronous = FULL` as the initial policy for financial data integrity.
+
+Any change to `NORMAL` must be documented, tested against crash recovery requirements, and explicitly approved.
+
+# 4. SQLITE WAL AND CONCURRENCY
+
+WAL is mandatory.
+
+### Expected Behaviour
+
+- Multiple readers can read concurrently.
+- A writer can operate while readers are reading.
+- SQLite permits only one active writer at a time.
+- Long-running readers can prevent WAL checkpoint progress.
+- Long-running write transactions must be avoided.
+
+### Write Transaction Policy
+
+Use short write transactions.
+
+For operations that need to acquire the write lock before reading and modifying data, use an appropriate immediate transaction.
+
+Example:
+
+```sql
+BEGIN IMMEDIATE;
+
+-- Perform necessary database operations
+
+COMMIT;
+```
+
+On failure:
+
+```sql
+ROLLBACK;
+```
+
+The Transaction Manager must ensure that transactions are correctly committed or rolled back.
+
+### Lock Handling
+
+Handle these errors separately:
+
+- SQLITE_BUSY
+- SQLITE_LOCKED
+- SQLITE_CONSTRAINT
+- SQLITE_FULL
+- SQLITE_CORRUPT
+- SQLITE_IOERR
+
+Rules:
+
+1. Configure a bounded busy timeout.
+2. Retry SQLITE_BUSY only when safe.
+3. Retry the complete transaction after rollback.
+4. Use exponential backoff with random jitter.
+5. Limit retry attempts.
+6. Do not retry validation or constraint errors blindly.
+7. Investigate SQLITE_LOCKED instead of treating every occurrence as a normal busy condition.
+8. Never silently discard failed writes.
+9. Log the final result and request ID.
+10. Return a clear error when recovery fails.
+
+### Write Queue
+
+Do not introduce a mandatory external message broker.
+
+For ordinary application writes, SQLite's locking and transaction mechanism remains the primary concurrency control.
+
+If sustained write contention is observed, introduce an optional persistent write queue or controlled worker process.
+
+An in-memory queue inside PHP-FPM is not a shared queue and must not be used for cross-request serialization.
+
+# 5. DATABASE INDEXING ENGINE
+
+Indexing is mandatory for every Module.
+
+### Index Naming Convention
+
+```text
+IDX_001_emp_status
+IDX_002_emp_created_at
+IDX_003_att_employee_date
+IDX_004_acc_transaction_date
+```
+
+Index IDs are documentation registry identifiers, not SQLite-generated numeric positions.
+
+### Index Registry
+
+Maintain:
+
+`Documentation/DATABASE_INDEX_REGISTRY.md`
+
+Required fields:
+
+| Field | Description |
+|---|---|
+| Index ID | Stable documentation ID |
+| Index Name | Actual SQLite index name |
+| Module | Owning Module |
+| Table | Indexed Table |
+| Columns | Indexed columns and order |
+| Type | Normal, Unique, Partial, etc. |
+| Purpose | Query pattern supported |
+| Migration | Creation migration |
+| Status | Active / Deprecated |
+
+### Mandatory Rules
+
+1. Every table must have a defined Primary Key.
+2. Frequently used WHERE conditions must be evaluated for indexing.
+3. JOIN columns must be evaluated.
+4. Foreign Key child columns must be indexed when required by workload.
+5. Composite indexes must follow actual query patterns.
+6. Date-based reports must use suitable indexes.
+7. Unique business identifiers must use UNIQUE constraints or indexes.
+8. Duplicate indexes are prohibited.
+9. Unused indexes must be reviewed.
+10. Every index must have a documented purpose.
+
+### Example
+
+```sql
+CREATE INDEX IF NOT EXISTS IDX_003_att_employee_date
+ON att_attendance(employee_id, attendance_date);
+```
+
+Index ordering must match query patterns.
+
+Do not index every column.
+
+SQLite's automatic Primary Key indexes must not be duplicated.
+
+### Index Validation
+
+Use:
+
+```sql
+EXPLAIN QUERY PLAN
+SELECT id, employee_name
+FROM emp_employees
+WHERE status = 'active';
+```
+
+The query plan must be reviewed for important queries.
+
+Use `PRAGMA optimize` as part of scheduled or post-maintenance optimization, not blindly on every request.
+
+# 6. QUERY PERFORMANCE ENGINE
+
+All Modules must follow the same query optimization standards.
+
+### Read Rules
+
+- Avoid SELECT *.
+- Select only required columns.
+- Use prepared statements.
+- Apply pagination to large datasets.
+- Prefer keyset pagination for large sequential datasets.
+- Avoid N+1 query patterns.
+- Avoid unnecessary JOINs.
+- Use appropriate filtering.
+- Avoid loading entire tables into PHP memory.
+- Avoid unnecessary repeated queries.
+- Use indexed search conditions where appropriate.
+
+### Keyset Pagination
+
+```sql
+SELECT id, employee_name, status
+FROM emp_employees
+WHERE id < :last_id
+ORDER BY id DESC
+LIMIT :limit;
+```
+
+### Large Report Rules
+
+- Require date ranges for large historical reports.
+- Use optimized aggregate queries.
+- Do not load unlimited transaction history.
+- Use background processing only when reports are genuinely long-running.
+- Do not keep database transactions open while generating downloadable files.
+
+### Search Rules
+
+B-tree indexes do not automatically optimize every text search.
+
+For full-text search, evaluate SQLite FTS5 only after confirming runtime support and demonstrating a real need.
+
+# 7. WRITE PERFORMANCE ENGINE
+
+### Mandatory Rules
+
+- Prepared Statements.
+- Short Transactions.
+- Batch Insert for bulk operations.
+- Avoid unnecessary UPDATE operations.
+- Validate before opening transactions.
+- Avoid external network requests inside transactions.
+- Avoid file uploads inside transactions.
+- Use atomic database operations where possible.
+- Use appropriate UNIQUE constraints for duplicate prevention.
+
+### Financial Idempotency
+
+Financial operations must prevent accidental duplicate execution.
+
+Use a unique business operation identifier or idempotency key where applicable.
+
+An identical request must not create duplicate payments or vouchers.
+
+### Cross-Module Operations
+
+For a business operation involving multiple Modules:
+
+- Define an explicit application service.
+- Keep related database changes in one transaction when they belong to the same database.
+- Do not call external services during the transaction.
+- Use a transactional outbox where reliable external event delivery is required.
+
+# 8. DATABASE SCHEMA RULES
+
+### Table Naming
+
+Every Module must use its assigned table prefix.
+
+Examples:
+
+```text
+emp_employees
+att_attendance
+acc_accounts
+inv_products
+inv_stock_movements
+```
+
+### Data Types
+
+- IDs: INTEGER PRIMARY KEY where appropriate.
+- Timestamps: Consistent UTC representation.
+- Dates: ISO 8601-compatible representation.
+- Money: Integer minor units or an exact decimal representation.
+- Boolean: INTEGER with CHECK constraints.
+- Status: Validated values with appropriate constraints.
+- JSON: Only where structured flexible data is justified.
+
+Never use binary floating-point for financial calculations.
+
+### Integrity Rules
+
+- Foreign Keys enabled.
+- NOT NULL where required.
+- UNIQUE constraints for business identifiers.
+- CHECK constraints for important business rules.
+- Appropriate ON DELETE behaviour.
+- RESTRICT deletion for important financial references.
+- No uncontrolled cascading deletion of financial history.
+
+Use STRICT tables only after verifying the installed SQLite version and migration compatibility.
+
+### Soft Delete
+
+Soft deletion must be used only when business requirements justify it.
+
+Financial records must not be silently deleted or overwritten.
+
+# 9. CENTRAL MIGRATION ENGINE
+
+All database migrations must be executed by the Core Migration Runner.
+
+### Ownership
+
+- Modules own their migration definitions.
+- Core owns migration execution.
+- Core owns migration history.
+- Modules cannot directly modify another Module's schema.
+- No Module may execute arbitrary migration files during ordinary HTTP requests.
+
+### Migration History
+
+Maintain a central table:
+
+```text
+system_migrations
+```
+
+Required fields:
+
+- migration_id
+- module_id
+- migration_version
+- checksum
+- applied_at
+- execution_time_ms
+- status
+
+### Migration Rules
+
+1. Every migration must have a unique identifier.
+2. Every migration must be versioned.
+3. Migration checksums must be verified.
+4. Migration execution must be ordered.
+5. Concurrent deployment migrations must be prevented.
+6. Failed migrations must be recorded safely.
+7. Destructive migrations require backup and explicit approval.
+8. Production schema changes must not happen automatically on page load.
+9. Migration rollback must be planned.
+10. Irreversible changes require forward-fix procedures.
+
+Use a deployment-time lock, such as an operating-system file lock, to prevent two migration processes from running simultaneously.
+
+Do not assume every SQLite schema change can be rolled back identically.
+
+# 10. DATABASE CACHE POLICY
+
+Caching is optional and must never replace the database as the source of truth.
+
+### Rules
+
+- Cache only frequently requested data.
+- Cache must have a defined TTL.
+- Cache invalidation must follow successful writes.
+- Sensitive user-specific data must be isolated.
+- Financial balances must not rely on stale cached values.
+- Cache failure must not corrupt database transactions.
+- Do not introduce Redis as a mandatory dependency.
+
+Start with request-level caching. Introduce cross-request file caching only when benchmarking demonstrates a benefit.
+
+# 11. BACKUP AND RESTORE ENGINE
+
+Database backup is mandatory.
+
+### Backup Rules
+
+- Use a consistent SQLite backup method.
+- Prefer SQLite Online Backup API or an equivalent WAL-aware method.
+- Do not copy only the `.db` file while active WAL writes are occurring.
+- Do not manually delete WAL or SHM files.
+- Keep backups outside the public directory.
+- Verify backup integrity.
+- Retain multiple backup generations.
+- Maintain at least one off-site copy.
+- Test actual restoration periodically.
+
+Where available, use the SQLite backup functionality through the SQLite3 extension or SQLite command-line backup facility.
+
+A backup is not considered successful until verification passes.
+
+### Integrity Checks
+
+Run appropriate checks:
+
+```sql
+PRAGMA quick_check;
+PRAGMA foreign_key_check;
+```
+
+Run a full integrity check periodically:
+
+```sql
+PRAGMA integrity_check;
+```
+
+### Recovery Requirements
+
+Document:
+
+- Recovery Point Objective (RPO)
+- Recovery Time Objective (RTO)
+- Backup retention
+- Restore procedure
+- Recovery verification
+
+# 12. WAL CHECKPOINT MANAGEMENT
+
+Checkpoint monitoring is mandatory.
+
+Monitor:
+
+- WAL file size
+- Checkpoint progress
+- Long-running readers
+- Checkpoint failures
+- Database growth
+
+Use passive checkpoints for routine monitoring where appropriate.
+
+Use restart or truncate checkpoints only under suitable maintenance conditions.
+
+Do not force frequent truncate checkpoints on every request.
+
+# 13. DATABASE MONITORING
+
+Maintain structured database logs.
+
+```text
+logs/
+├── database.log
+├── slow-queries.log
+├── database-locks.log
+├── migration.log
+├── backup.log
+└── database-errors.log
+```
+
+Track:
+
+- Query execution time
+- Slow query frequency
+- Lock frequency
+- Retry count
+- Failed transactions
+- WAL growth
+- Database file size
+- Migration duration
+- Backup status
+
+Do not log passwords, secrets, sensitive SQL parameter values, or unnecessary personal information.
+
+# 14. DATABASE SECURITY
+
+Mandatory:
+
+1. Database outside public web root.
+2. Restrictive filesystem permissions.
+3. Prepared Statements.
+4. No user-controlled SQL identifiers.
+5. Allowlisted dynamic sorting and filtering.
+6. Server-side authorization.
+7. Foreign Key enforcement.
+8. Safe backup permissions.
+9. No public access to logs or database files.
+10. No direct database access from browser JavaScript.
+
+Every Module must enforce its assigned data access permissions.
+
+# 15. DATABASE ENVIRONMENT REQUIREMENTS
+
+The database must operate on a local filesystem with reliable locking support.
+
+Do not place the live SQLite database on:
+
+- Network filesystems without verified SQLite locking support.
+- Cloud storage mounts.
+- Direct remote object storage.
+- Shared folders with unreliable locking semantics.
+
+Backups may be copied to remote storage after a consistent backup has been created.
+
+Verify the installed SQLite library version and required capabilities during installation.
+
+# 16. PERFORMANCE ACCEPTANCE TESTS
+
+No Module can be declared database-ready without passing:
+
+- Indexed Read Test.
+- Indexed Search Test.
+- Pagination Test.
+- Batch Insert Test.
+- Concurrent Reader Test.
+- Concurrent Writer Test.
+- Read/Write Contention Test.
+- Busy Recovery Test.
+- Transaction Rollback Test.
+- Duplicate Prevention Test.
+- Migration Test.
+- Foreign Key Test.
+- Backup Restore Test.
+- Integrity Test.
+
+### Initial Benchmark Targets
+
+| Operation | Initial Target |
+|---|---|
+| Indexed simple read | P95 <= 100 ms |
+| Simple write | P95 <= 250 ms |
+| Normal application request | P95 <= 500 ms |
+| Financial consistency | 100% |
+| Data loss | 0 |
+| Unauthorized data access | 0 |
+
+These are engineering targets, not guaranteed hardware performance.
+
+All benchmarks must record:
+
+- Dataset size
+- Concurrent request count
+- Hardware
+- SQLite version
+- PHP version
+- Query plan
+- P50
+- P95
+- P99
+- Error rate
+- Lock retry rate
+
+# 17. MODULE DEVELOPMENT RULES
+
+Every new Module must provide:
+
+1. Migration files.
+2. Table schema.
+3. Index definitions.
+4. Index Registry entries.
+5. Repository implementation.
+6. Query optimization evidence.
+7. Permission enforcement.
+8. Transaction handling.
+9. Test cases.
+10. Migration documentation.
+
+Modules must not create independent database files unless explicitly approved through an Architecture Change Request.
+
+# 18. DATABASE COMPLETION CHECKLIST
+
+- [ ] Central PDO Manager implemented.
+- [ ] WAL enabled and verified.
+- [ ] Connection-level PRAGMAs verified.
+- [ ] Transaction Manager implemented.
+- [ ] Migration Runner implemented.
+- [ ] Migration History implemented.
+- [ ] Index Registry implemented.
+- [ ] Query Monitoring implemented.
+- [ ] Lock Recovery tested.
+- [ ] Backup and Restore tested.
+- [ ] Integrity Checks implemented.
+- [ ] All Module migrations registered.
+- [ ] All important queries optimized.
+- [ ] Concurrent Read/Write tests passed.
+- [ ] Financial integrity tests passed.
+- [ ] Security tests passed.
+- [ ] Performance report generated.
+
+**Final Rule:**
+
+No Module is database-ready merely because CRUD operations work.
+
+Database readiness requires verified schema integrity, query optimization, safe concurrency, reliable recovery, and passing tests.
+
+End of Database Architecture V2.0.
