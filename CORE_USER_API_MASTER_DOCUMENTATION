@@ -20,9 +20,6 @@ The Core must operate when the Modules directory is empty. It must provide secur
 
 The future Modules will not all behave the same way. Each will own its own business logic, data model, workflow, screens and rules. The Core must provide common infrastructure without forcing all Modules into one generic workflow.
 
-The existing repository Master Documentation remains the source of truth:
-https://raw.githubusercontent.com/dratc/50m/refs/heads/main/readme.md
-
 Read the complete current document and inspect the actual repository before implementation. This document expands Core and User Management. It does not silently replace or weaken the Master Documentation.
 
 If two specifications conflict, record the exact clauses and request the Project Owner's decision. Do not silently choose the easier option.
@@ -245,6 +242,7 @@ PROJECT/
   PROJECT_STATUS.md
   CHANGELOG.md
   README.md
+  index.php
 ```
 
 The structure is a target, not permission to overwrite existing work.
