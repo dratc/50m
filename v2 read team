@@ -80,9 +80,11 @@ app/
 │   └── cache/
 │
 └── Documentation/
+    ├── index.php
     ├── DATABASE_INDEX_REGISTRY.md
     ├── DATABASE_MIGRATION_HISTORY.md
     └── DATABASE_PERFORMANCE.md
+
 ```
 
 **Security:** `storage/` must remain outside the public web root.
